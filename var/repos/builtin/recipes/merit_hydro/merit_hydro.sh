@@ -370,7 +370,7 @@ if [[ -n "$shapefile" ]] && [[ -n $stats ]]; then
 fi
 
 # produce stats if required
-mkdir "$HOME/empty_dir" 
+mkdir -p "$HOME/empty_dir" 
 echo "$(logDate)$(basename $0): deleting temporary files from $cache"
 rsync --quiet -aP --delete "$HOME/empty_dir/" "$cache"
 rm -r "$cache"

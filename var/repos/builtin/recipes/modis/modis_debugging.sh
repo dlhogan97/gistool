@@ -226,19 +226,242 @@ fi
 # build .vrt file out of annual MODIS HDFs for each of the $variables
 echo "$(logDate)$(basename $0): building virtual format (.vrt) of MODIS HDFs under $cache"
 for var in "${variables[@]}"; do
+  echo "$(logDate)$(basename $0): processing variable $var"
   for yr in "${yearsRange[@]}"; do
+    echo "$(logDate)$(basename $0): processing year $yr"
     # format year to conform to MODIS nomenclature
     yrFormatted="${yr}.01.01"
     
     # create temporary directories for each variable
     mkdir -p "${cache}/${var}"
-    
-    # make .vrt out of each variable's HDFs 
+    # make .vrt out of each variable's HDFs
     # ATTENTION: the second argument is not contained with quotation marks
-    gdalbuildvrt "${cache}/${var}/${yr}.vrt" ${geotiffDir}/${var}/${yrFormatted}/*.hdf -resolution highest -sd 1 > /dev/null
+    # Get the first (and presumably only) HDF file in the folder
+    # Collect the list of HDFs for the year
+    # Construct output .vrt path
+    vrt_path="${cache}/${var}/${yr}.vrt"
+
+    # Enable nullglob to handle empty glob patterns properly
+    shopt -s nullglob
     
-    # reproject .vrt to the standard EPSG:4326 projection
-    gdalwarp -of VRT -t_srs "EPSG:$crs" "${cache}/${var}/${yr}.vrt" "${cache}/${var}/${yr}_${crs}.vrt" > /dev/null
+    # Collect the list of HDFs for the year
+    hdf_files=(${geotiffDir}/${var}/${yrFormatted}/*.hdf)
+    
+    # Disable nullglob after use
+    shopt -u nullglob
+
+    # Debug: Print what we found
+    echo "🔍 Looking for HDF files in: ${geotiffDir}/${var}/${yrFormatted}/"
+    echo "🔍 Current working directory: $(pwd)"
+    echo "🔍 Running as user: $(whoami)"
+    echo "🔍 Script permissions: $(ls -la "$0" 2>/dev/null | awk '{print $1, $3, $4}' || echo "Cannot check")"
+    echo "🔍 Directory permissions: $(ls -la "${geotiffDir}/${var}/${yrFormatted}/" 2>/dev/null | head -2 | tail -1 | awk '{print $1, $3, $4}' || echo "Cannot access directory")"
+    echo "🔍 Number of HDF files found: ${#hdf_files[@]}"
+    if [ ${#hdf_files[@]} -gt 0 ]; then
+      echo "🔍 First HDF file: ${hdf_files[0]}"
+      echo "🔍 First HDF file permissions: $(ls -la "${hdf_files[0]}" 2>/dev/null | awk '{print $1, $3, $4}' || echo "Cannot stat file")"
+    fi
+
+    # Check if HDF files exist
+    if [ ${#hdf_files[@]} -eq 0 ]; then
+      echo "❌ No HDF files found for ${yrFormatted}"
+      
+      # Try alternative method using find
+      echo "🔍 Trying alternative search with find command..."
+      mapfile -t hdf_files_alt < <(find "${geotiffDir}/${var}/${yrFormatted}/" -name "*.hdf" -type f 2>/dev/null)
+      
+      if [ ${#hdf_files_alt[@]} -gt 0 ]; then
+        echo "🔍 Found ${#hdf_files_alt[@]} HDF files with find command"
+        hdf_files=("${hdf_files_alt[@]}")
+      else
+        echo "❌ Still no HDF files found, skipping ${yrFormatted}"
+        continue
+      fi
+    fi
+    
+    if [ ${#hdf_files[@]} -gt 0 ]; then
+      echo "🔄 About to run gdalbuildvrt with ${#hdf_files[@]} HDF files"
+      
+      # Check file accessibility and permissions
+      echo "🔍 Checking file accessibility..."
+      accessible_files=()
+      for hdf_file in "${hdf_files[@]}"; do
+        if [ -r "$hdf_file" ]; then
+          accessible_files+=("$hdf_file")
+          echo "✅ Can read: $hdf_file"
+        else
+          echo "❌ Cannot read: $hdf_file"
+          ls -la "$hdf_file" 2>/dev/null || echo "   File doesn't exist or no permissions to stat"
+        fi
+      done
+      
+      if [ ${#accessible_files[@]} -eq 0 ]; then
+        echo "❌ No accessible HDF files found! Script cannot read any files."
+        continue
+      fi
+      
+      echo "🔍 Using ${#accessible_files[@]} accessible files out of ${#hdf_files[@]} total"
+      
+      # Test if gdalbuildvrt is accessible and working
+      echo "🔍 Testing gdalbuildvrt availability..."
+      if command -v gdalbuildvrt >/dev/null 2>&1; then
+        echo "✅ gdalbuildvrt found in PATH"
+        gdalbuildvrt --help >/dev/null 2>&1 && echo "✅ gdalbuildvrt help works" || echo "❌ gdalbuildvrt help failed"
+        
+        # Test HDF4 support in GDAL
+        echo "🔍 Testing HDF4 support in GDAL..."
+        hdf4_test_output=$(gdalinfo "$first_hdf" 2>&1)
+        if echo "$hdf4_test_output" | grep -q "not recognized as being in a supported file format"; then
+          echo "❌ GDAL does not have HDF4 support!"
+          echo "📋 Error details:"
+          echo "$hdf4_test_output" | grep -E "(ERROR|not recognized|plugin.*not available|install.*libgdal-hdf4)"
+          echo ""
+          echo "� Current conda environment: ${CONDA_DEFAULT_ENV:-"(not set)"}"
+          echo "🔍 Current Python: $(which python)"
+          echo "🔍 Current gdalinfo: $(which gdalinfo)"
+          echo ""
+          
+          # Try to automatically activate the correct environment
+          echo "🔄 Attempting to activate conda environment with HDF4 support..."
+          
+          # Check if conda is available
+          if command -v conda >/dev/null 2>&1; then
+            # Try to activate data-and-plotting environment
+            if conda info --envs | grep -q "data-and-plotting"; then
+              echo "🔄 Found 'data-and-plotting' environment, activating..."
+              eval "$(conda shell.bash hook)"
+              conda activate data-and-plotting
+              
+              # Test again after activation
+              echo "🔍 Re-testing HDF4 support after environment activation..."
+              hdf4_retest_output=$(gdalinfo "$first_hdf" 2>&1)
+              if echo "$hdf4_retest_output" | grep -q "Driver: HDF4"; then
+                echo "✅ SUCCESS! HDF4 support now available after activating data-and-plotting"
+                echo "🔍 New gdalinfo location: $(which gdalinfo)"
+              else
+                echo "❌ Still no HDF4 support after activating data-and-plotting"
+                echo "🔧 Manual steps required:"
+                echo "   1. conda activate data-and-plotting"
+                echo "   2. conda install -c conda-forge libgdal-hdf4"
+                echo "   3. Re-run this script"
+                exit 1
+              fi
+            else
+              echo "❌ 'data-and-plotting' environment not found"
+              echo "🔧 Manual steps required:"
+              echo "   1. Create environment: conda create -n data-and-plotting"
+              echo "   2. conda activate data-and-plotting" 
+              echo "   3. conda install -c conda-forge gdal libgdal-hdf4"
+              echo "   4. Re-run this script"
+              exit 1
+            fi
+          else
+            echo "❌ conda command not available"
+            echo "� Please install conda/miniconda and set up HDF4 support manually"
+            exit 1
+          fi
+        elif echo "$hdf4_test_output" | grep -q "Driver: HDF4"; then
+          echo "✅ GDAL has HDF4 support - can read MODIS files!"
+        else
+          echo "⚠️  Unknown GDAL HDF4 status - proceeding with caution"
+          echo "📋 gdalinfo output preview:"
+          echo "$hdf4_test_output" | head -5
+        fi
+      else
+        echo "❌ gdalbuildvrt not found in PATH"
+        echo "🔍 PATH: $PATH"
+        echo "🔧 Make sure GDAL is installed and activate the correct conda environment"
+        exit 1
+      fi
+      
+      # Check HDF subdatasets
+      echo "🔍 Examining HDF subdatasets..."
+      first_hdf="${accessible_files[0]}"
+      
+      # Show subdataset section of gdalinfo output for debugging
+      echo "🔍 Subdataset section from gdalinfo:"
+      gdalinfo "$first_hdf" | sed -n '/^Subdatasets:/,/^Corner Coordinates:/p' | head -20
+      echo "🔍 ======================"
+      
+      # Extract subdatasets using the correct format
+      echo "🔍 Extracting subdatasets..."
+      
+      # Method 1: Look for SUBDATASET_1_NAME specifically
+      subdataset_1=$(gdalinfo "$first_hdf" | grep "^  SUBDATASET_1_NAME=" | cut -d'=' -f2)
+      echo "🔍 Method 1 result: '$subdataset_1'"
+      
+      # Show all available subdatasets for reference
+      echo "🔍 All available subdatasets:"
+      gdalinfo "$first_hdf" | grep "^  SUBDATASET_.*_NAME="
+      
+      if [ -n "$subdataset_1" ]; then
+        echo "🔍 Using subdataset 1: $subdataset_1"
+        
+        # Create array of subdataset paths for all HDF files
+        subdataset_files=()
+        for hdf_file in "${accessible_files[@]}"; do
+          # Extract subdataset 1 for each HDF file
+          subdataset_path=$(gdalinfo "$hdf_file" | grep "^  SUBDATASET_1_NAME=" | cut -d'=' -f2)
+          
+          if [ -n "$subdataset_path" ]; then
+            # Remove any leading/trailing whitespace
+            subdataset_path=$(echo "$subdataset_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            subdataset_files+=("$subdataset_path")
+            echo "🔍 Added subdataset: $subdataset_path"
+          else
+            echo "❌ Could not extract subdataset from: $hdf_file"
+          fi
+        done
+        
+        echo "🔍 Created ${#subdataset_files[@]} subdataset references"
+      else
+        echo "❌ Could not find SUBDATASET_1_NAME in HDF file"
+        echo "🔍 Let's try a fallback approach - using the HDF file directly"
+        subdataset_files=("${accessible_files[@]}")
+        echo "🔍 Using ${#subdataset_files[@]} HDF files directly"
+      fi
+      
+      # Check if output directory is writable
+      if [ ! -w "$(dirname "$vrt_path")" ]; then
+        echo "❌ Cannot write to output directory: $(dirname "$vrt_path")"
+        ls -la "$(dirname "$vrt_path")" 2>/dev/null || echo "   Directory doesn't exist"
+        continue
+      fi
+      
+      echo "🔄 Running: gdalbuildvrt -overwrite \"$vrt_path\" [${#subdataset_files[@]} subdatasets] -resolution highest"
+
+      # Run gdalbuildvrt with subdataset references (no -sd flag needed)
+      gdal_output=$(gdalbuildvrt -overwrite "$vrt_path" "${subdataset_files[@]}" -resolution highest 2>&1)
+      gdal_exit_code=$?
+      
+      if [ $gdal_exit_code -eq 0 ]; then
+        # Check if VRT was created
+        if [ -f "$vrt_path" ]; then
+          echo "✅ Successfully created $vrt_path"
+          
+          # reproject .vrt to the standard EPSG:4326 projection
+          echo "🔄 Reprojecting VRT to EPSG:$crs"
+          gdalwarp_output=$(gdalwarp -of VRT -t_srs "EPSG:$crs" "${cache}/${var}/${yr}.vrt" "${cache}/${var}/${yr}_${crs}.vrt" 2>&1)
+          gdalwarp_exit_code=$?
+          
+          if [ $gdalwarp_exit_code -eq 0 ]; then
+            if [ -f "${cache}/${var}/${yr}_${crs}.vrt" ]; then
+              echo "✅ .vrt file for $var in $yr is created under ${cache}/${var}/${yr}_${crs}.vrt"
+            else
+              echo "❌ Failed to create reprojected VRT: ${cache}/${var}/${yr}_${crs}.vrt"
+            fi
+          else
+            echo "❌ gdalwarp command failed for ${cache}/${var}/${yr}.vrt"
+            echo "📋 gdalwarp error output: $gdalwarp_output"
+          fi
+        else
+          echo "❌ VRT file was not created: $vrt_path"
+        fi
+      else
+        echo "❌ gdalbuildvrt command failed with exit code: $gdal_exit_code"
+        echo "📋 gdalbuildvrt error output: $gdal_output"
+      fi
+    fi
   done
 done
 
@@ -302,9 +525,10 @@ if [[ -n "$shapefile" ]] && [[ -n $stats ]]; then
 fi
 
 # produce stats if required
-mkdir "$HOME/empty_dir" 
+mkdir -p "$HOME/empty_dir" 
 echo "$(logDate)$(basename $0): deleting temporary files from $cache"
-#rsync --quiet -aP --delete "$HOME/empty_dir/" "$cache"
-#rm -r "$cache"
+# rsync --quiet -aP --delete "$HOME/empty_dir/" "$cache"
+# rm -r "$cache"
 echo "$(logDate)$(basename $0): temporary files from $cache are removed"
 echo "$(logDate)$(basename $0): results are produced under $outputDir"
+
