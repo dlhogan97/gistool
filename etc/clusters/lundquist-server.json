@@ -1,0 +1,16 @@
+{
+    "specs": {
+        "cpus": 24,
+        "time": "04:00:00",
+        "nodes": 1,
+        "partition": "default",
+        "account": "",
+        "mem": "64000M"
+    },
+    "modules": {
+        "init": [
+            "source /home/dlhogan/miniforge3/etc/profile.d/conda.sh",
+            "conda activate CONFLUENCE-base"
+    ]
+    }
+}
